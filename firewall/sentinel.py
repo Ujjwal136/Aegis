@@ -38,21 +38,39 @@ class Sentinel:
             return False
 
     def scan(self, prompt: str) -> dict:
+        heuristic_hit = self._threat_type(prompt)
+        if heuristic_hit == "none" and self._is_safe_banking_intent(prompt):
+            return {
+                "is_threat": False,
+                "confidence": 0.05,
+                "threat_type": "none",
+            }
+
         if self.model:
             is_threat, confidence = self._model_predict(prompt)
-            threat_type = self._threat_type(prompt) if is_threat else "none"
+            # Block on model only at high confidence; regex hits always block.
+            if heuristic_hit != "none":
+                is_threat = True
+                threat_type = heuristic_hit
+            else:
+                is_threat = is_threat and confidence >= 0.85
+                threat_type = "model_risk" if is_threat else "none"
             return {
                 "is_threat": is_threat,
                 "confidence": confidence,
                 "threat_type": threat_type,
             }
 
-        heuristic_hit = self._threat_type(prompt)
         return {
             "is_threat": heuristic_hit != "none",
             "confidence": 0.9 if heuristic_hit != "none" else 0.1,
             "threat_type": heuristic_hit,
         }
+
+    def _is_safe_banking_intent(self, prompt: str) -> bool:
+        lowered = prompt.lower()
+        safe_terms = ["balance", "transaction", "loan", "ifsc", "interest", "customer", "cust"]
+        return any(term in lowered for term in safe_terms)
 
     def _model_predict(self, prompt: str) -> tuple[bool, float]:
         score = self.model.get("prior", 0.0)
