@@ -3,10 +3,11 @@ from __future__ import annotations
 import pickle
 import re
 from collections import defaultdict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from config import settings
+from firewall.fpe_engine import FPE_ENCRYPT_MAP
 from firewall.train_redactor import extract_features
 
 
@@ -14,6 +15,18 @@ from firewall.train_redactor import extract_features
 class RedactionResult:
     redacted_text: str
     redactions: list[str]
+    encrypted_fields: list[str] = field(default_factory=list)
+
+
+def _fpe_or_redact(entity_type: str, raw_value: str) -> tuple[str, bool]:
+    """Return (replacement_text, was_fpe_encrypted)."""
+    encrypt_fn = FPE_ENCRYPT_MAP.get(entity_type)
+    if encrypt_fn is not None:
+        result = encrypt_fn(raw_value)
+        # If encrypt_fn fell back to [TYPE_REDACTED], it wasn't truly encrypted
+        if not result.startswith("["):
+            return result, True
+    return f"[{entity_type}_REDACTED]", False
 
 
 class Redactor:
@@ -64,37 +77,74 @@ class Redactor:
     def redact(self, text: str) -> dict[str, Any]:
         redacted = text
         redactions: list[str] = []
+        encrypted_fields: list[str] = []
 
-        # NER model pass: detect entities and redact them
+        # NER model pass: detect entities and encrypt/redact them
         if self.ner_model is not None:
             try:
                 tokens = re.findall(r"\S+", redacted)
                 if tokens:
                     labels = self._ner_predict(tokens)
-                    # Build entity spans (right-to-left replacement to preserve indices)
-                    spans: list[tuple[int, int, str]] = []
+                    # Group consecutive B-/I- tokens of the same entity type
+                    entities: list[tuple[list[str], str]] = []
+                    current_tokens: list[str] = []
+                    current_type: str = ""
                     for token, label in zip(tokens, labels):
-                        if label.startswith("B-") or label.startswith("I-"):
-                            etype = label[2:]
-                            start = redacted.find(token)
-                            if start != -1:
-                                spans.append((start, start + len(token), etype))
-                    # Replace right-to-left so indices stay valid
-                    for start, end, etype in sorted(spans, key=lambda s: s[0], reverse=True):
-                        tag = f"[{etype}_REDACTED]"
-                        redacted = redacted[:start] + tag + redacted[end:]
+                        if label.startswith("B-"):
+                            if current_tokens:
+                                entities.append((list(current_tokens), current_type))
+                            current_tokens = [token]
+                            current_type = label[2:]
+                        elif label.startswith("I-") and label[2:] == current_type:
+                            current_tokens.append(token)
+                        else:
+                            if current_tokens:
+                                entities.append((list(current_tokens), current_type))
+                                current_tokens = []
+                                current_type = ""
+                    if current_tokens:
+                        entities.append((list(current_tokens), current_type))
+
+                    # Replace entities right-to-left by finding the full span in text
+                    for ent_tokens, etype in reversed(entities):
+                        # Find span: locate first token, then extend to cover all tokens
+                        first = ent_tokens[0]
+                        start = redacted.find(first)
+                        if start == -1:
+                            continue
+                        last = ent_tokens[-1]
+                        end_search_start = start + len(first)
+                        if len(ent_tokens) > 1:
+                            last_pos = redacted.find(last, end_search_start)
+                            if last_pos == -1:
+                                continue
+                            end = last_pos + len(last)
+                        else:
+                            end = start + len(first)
+                        raw_value = redacted[start:end]
+                        replacement, was_encrypted = _fpe_or_redact(etype, raw_value)
+                        redacted = redacted[:start] + replacement + redacted[end:]
                         redactions.append(etype)
+                        if was_encrypted:
+                            encrypted_fields.append(etype)
             except Exception:
                 pass
 
         # Regex fallback stays active regardless of model state for stronger safety.
         for pii_type, pattern in self._compiled_patterns.items():
-            if pattern.search(redacted):
-                redacted = pattern.sub(f"[{pii_type}_REDACTED]", redacted)
+            match = pattern.search(redacted)
+            if match:
+                def _replace(m: re.Match, pt: str = pii_type) -> str:
+                    replacement, was_encrypted = _fpe_or_redact(pt, m.group(0))
+                    if was_encrypted and pt not in encrypted_fields:
+                        encrypted_fields.append(pt)
+                    return replacement
+                redacted = pattern.sub(_replace, redacted)
                 redactions.append(pii_type)
 
         unique_redactions = sorted(set(redactions))
         return {
             "redacted_text": redacted,
             "redactions": unique_redactions,
+            "encrypted_fields": sorted(set(encrypted_fields)),
         }
