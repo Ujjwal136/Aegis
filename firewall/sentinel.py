@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass
 
 from config import settings
+from firewall.train_sentinel import SGDClassifier, vectorize
 
 
 THREAT_PATTERNS = {
@@ -13,8 +14,6 @@ THREAT_PATTERNS = {
     "data_exfiltration": re.compile(r"aadhaar|pan|upi|passport|dump|all records|unmasked|raw", re.IGNORECASE),
     "sql_injection": re.compile(r"\bunion\b|\bdrop\b|\bor\s+'1'='1|;\s*select", re.IGNORECASE),
 }
-
-TOKEN_RE = re.compile(r"\b\w+\b", re.IGNORECASE)
 
 
 @dataclass
@@ -26,15 +25,19 @@ class SentinelResult:
 
 class Sentinel:
     def __init__(self) -> None:
-        self.model: dict | None = None
+        self.classifier: SGDClassifier | None = None
+        self.vocab: dict[str, int] | None = None
 
     def load(self) -> bool:
         try:
             with open(settings.sentinel_model_path, "rb") as f:
-                self.model = pickle.load(f)
+                data = pickle.load(f)
+            self.classifier = SGDClassifier.from_dict(data["classifier"])
+            self.vocab = data["vocab"]
             return True
-        except FileNotFoundError:
-            self.model = None
+        except (FileNotFoundError, KeyError):
+            self.classifier = None
+            self.vocab = None
             return False
 
     def scan(self, prompt: str) -> dict:
@@ -46,9 +49,8 @@ class Sentinel:
                 "threat_type": "none",
             }
 
-        if self.model:
+        if self.classifier and self.vocab:
             is_threat, confidence = self._model_predict(prompt)
-            # Block on model only at high confidence; regex hits always block.
             if heuristic_hit != "none":
                 is_threat = True
                 threat_type = heuristic_hit
@@ -73,11 +75,8 @@ class Sentinel:
         return any(term in lowered for term in safe_terms)
 
     def _model_predict(self, prompt: str) -> tuple[bool, float]:
-        score = self.model.get("prior", 0.0)
-        token_scores = self.model.get("token_scores", {})
-        for token in TOKEN_RE.findall(prompt.lower()):
-            score += token_scores.get(token, 0.0)
-        prob_attack = 1.0 / (1.0 + math.exp(-max(min(score, 50), -50)))
+        x = vectorize(prompt, self.vocab)
+        prob_attack = self.classifier.predict_proba(x)
         return (prob_attack >= 0.55, float(prob_attack))
 
     def _threat_type(self, prompt: str) -> str:
