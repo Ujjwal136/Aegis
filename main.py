@@ -6,7 +6,8 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from agents import BankingDB, LLMAgent, ManagingAgent
+from agents import LLMAgent, banking_db, managing_agent as ma
+from agents.managing_agent import QueryResult
 from config import settings
 from firewall.interceptor import Interceptor
 from firewall.redactor import Redactor
@@ -34,8 +35,6 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(mess
 logger = logging.getLogger("aegis")
 
 llm_agent = LLMAgent()
-db = BankingDB()
-managing_agent = ManagingAgent(db, llm_agent)
 sentinel = Sentinel()
 redactor = Redactor()
 weilchain = Weilchain(db_path=settings.weilchain_db_path)
@@ -66,7 +65,12 @@ def chat(payload: ChatRequest) -> ChatResponse:
             redactions=[],
         )
 
-    raw_db = managing_agent.execute_planned_query(ingress["sanitized_prompt"])
+    result = ma.plan_and_execute(ingress["sanitized_prompt"])
+    if not result.success:
+        logger.warning("[db] trace=%s error=%s", ingress["trace_id"], result.error)
+        raw_db = []
+    else:
+        raw_db = result.raw_data
     logger.info("[db] trace=%s rows=%d", ingress["trace_id"], len(raw_db))
     egress = interceptor.egress(ingress["trace_id"], payload.session_id, str(raw_db))
     logger.info("[egress] trace=%s verdict=%s redactions=%s", ingress["trace_id"], egress["verdict"], egress["redactions"])
