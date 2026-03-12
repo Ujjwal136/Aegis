@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
 
     sentinel_model_path: str = "sentinel_model.joblib"
+    sentinel_b_model_path: str = "sentinel_b_model.joblib"
     sentinel_vectorizer_path: str = "vectorizer.joblib"
 
     redactor_model_path: str = "firewall/aegis_redactor"
