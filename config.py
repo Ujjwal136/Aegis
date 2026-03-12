@@ -18,6 +18,7 @@ class Settings(BaseSettings):
     redactor_model_path: str = "firewall/aegis_redactor"
 
     database_path: str = "aegis.db"
+    weilchain_db_path: str = "weilchain.db"
 
 
 settings = Settings()

@@ -3,4 +3,5 @@ __pycache__/
 .venv/
 .venv313/
 *.db
+.env
 .pytest_cache/

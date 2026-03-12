@@ -54,7 +54,7 @@ class ManagingAgent:
 
     def _is_safe_select(self, sql: str) -> bool:
         normalized = sql.strip().lower().rstrip(";")
-        forbidden = [" insert ", " update ", " delete ", " drop ", " alter ", " create ", " pragma "]
+        forbidden = [" insert ", " update ", " delete ", " drop ", " alter ", " create ", " pragma ", " union ", " attach ", " detach "]
         if not normalized.startswith("select "):
             return False
         wrapped = f" {normalized} "

@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import os
+
+os.environ["WEILCHAIN_DB_PATH"] = ":memory:"
+os.environ["DATABASE_PATH"] = "test_aegis.db"
+
 from fastapi.testclient import TestClient
 
 from main import app

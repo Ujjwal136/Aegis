@@ -39,11 +39,14 @@ class LLMAgent:
             "Authorization": f"Bearer {settings.openai_api_key}",
             "Content-Type": "application/json",
         }
-        with httpx.Client(timeout=20.0) as client:
-            response = client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-        return data["choices"][0]["message"]["content"]
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                response = client.post("https://api.openai.com/v1/chat/completions", headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+            return data["choices"][0]["message"]["content"]
+        except (httpx.HTTPStatusError, httpx.RequestError, KeyError):
+            return self._ask_mock(prompt)
 
     def _ask_anthropic(self, prompt: str) -> str:
         payload = {
@@ -56,11 +59,14 @@ class LLMAgent:
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
         }
-        with httpx.Client(timeout=20.0) as client:
-            response = client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
-            response.raise_for_status()
-            data = response.json()
-        return data["content"][0]["text"]
+        try:
+            with httpx.Client(timeout=20.0) as client:
+                response = client.post("https://api.anthropic.com/v1/messages", headers=headers, json=payload)
+                response.raise_for_status()
+                data = response.json()
+            return data["content"][0]["text"]
+        except (httpx.HTTPStatusError, httpx.RequestError, KeyError):
+            return self._ask_mock(prompt)
 
     def _ask_mock(self, prompt: str) -> str:
         if "Sanitized data:" in prompt:

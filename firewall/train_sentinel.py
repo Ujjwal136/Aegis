@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import math
 import pickle
+import random
 import re
 from collections import Counter
 from pathlib import Path
@@ -94,6 +95,9 @@ def main() -> None:
 
     if not rows:
         raise FileNotFoundError("No training rows found in local datasets.")
+
+    random.seed(42)
+    random.shuffle(rows)
 
     split_index = int(len(rows) * 0.8)
     train_rows = rows[:split_index]

@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from agents import BankingDB, LLMAgent, ManagingAgent
 from config import settings
@@ -22,6 +24,12 @@ from models.schemas import (
 
 
 app = FastAPI(title=settings.app_name)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("aegis")
 
@@ -30,7 +38,7 @@ db = BankingDB()
 managing_agent = ManagingAgent(db, llm_agent)
 sentinel = Sentinel()
 redactor = Redactor()
-weilchain = Weilchain()
+weilchain = Weilchain(db_path=settings.weilchain_db_path)
 interceptor = Interceptor(sentinel, redactor, weilchain)
 
 sentinel_loaded = sentinel.load()
@@ -40,6 +48,13 @@ redactor_loaded = redactor.load()
 @app.post("/api/v1/chat", response_model=ChatResponse)
 def chat(payload: ChatRequest) -> ChatResponse:
     logger.info("[chat] session=%s prompt=%s", payload.session_id, payload.message)
+    if not payload.message.strip():
+        return ChatResponse(
+            trace_id="none",
+            verdict="CLEAN",
+            response="Please enter a valid banking query.",
+            redactions=[],
+        )
     ingress = interceptor.ingress(payload.message, payload.session_id)
     logger.info("[ingress] trace=%s verdict=%s", ingress["trace_id"], ingress["verdict"])
     if ingress["verdict"] == "BLOCKED":
@@ -93,3 +108,6 @@ def verify(trace_id: str) -> dict:
 @app.get("/health", response_model=HealthResponse)
 def health() -> HealthResponse:
     return HealthResponse(status="ok", sentinel_loaded=sentinel_loaded, redactor_loaded=redactor_loaded)
+
+
+app.mount("/", StaticFiles(directory="frontend", html=True), name="frontend")

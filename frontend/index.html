@@ -121,19 +121,24 @@
 
     async function sendPrompt(prompt) {
       addMessage('user', prompt);
-      const res = await fetch('/api/v1/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: prompt, session_id: 'web-ui' })
-      });
-      const data = await res.json();
-      addMessage('ai', data.response);
+      try {
+        const res = await fetch('/api/v1/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ message: prompt, session_id: 'web-ui' })
+        });
+        if (!res.ok) { addMessage('ai', `Server error (${res.status})`); return; }
+        const data = await res.json();
+        addMessage('ai', data.response);
 
-      const pill = document.createElement('span');
-      pill.className = `pill ${data.verdict}`;
-      pill.textContent = `${data.verdict} :: ${data.trace_id.slice(0, 8)}`;
-      verdicts.prepend(pill);
-      await refreshLedger();
+        const pill = document.createElement('span');
+        pill.className = `pill ${data.verdict}`;
+        pill.textContent = `${data.verdict} :: ${data.trace_id.slice(0, 8)}`;
+        verdicts.prepend(pill);
+        await refreshLedger();
+      } catch (err) {
+        addMessage('ai', `Connection error: ${err.message}`);
+      }
     }
 
     document.getElementById('send').addEventListener('click', async () => {
