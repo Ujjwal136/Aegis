@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import pickle
 import re
+from collections import defaultdict
 from dataclasses import dataclass
 from typing import Any
 
 from config import settings
+from firewall.train_redactor import extract_features
 
 
 @dataclass
@@ -15,7 +18,8 @@ class RedactionResult:
 
 class Redactor:
     def __init__(self) -> None:
-        self.ner_pipeline = None
+        self.ner_model: dict | None = None
+        self.ner_classes: set[str] = set()
         self._compiled_patterns = {
             "AADHAAR": re.compile(r"\b\d{4}\s?\d{4}\s?\d{4}\b"),
             "PAN": re.compile(r"\b[A-Z]{5}[0-9]{4}[A-Z]\b", re.IGNORECASE),
@@ -30,32 +34,56 @@ class Redactor:
 
     def load(self) -> bool:
         try:
-            from transformers import AutoModelForTokenClassification, AutoTokenizer, pipeline
-
-            tokenizer = AutoTokenizer.from_pretrained(settings.redactor_model_path)
-            model = AutoModelForTokenClassification.from_pretrained(settings.redactor_model_path)
-            self.ner_pipeline = pipeline("ner", model=model, tokenizer=tokenizer, aggregation_strategy="simple")
+            with open(settings.ner_model_path, "rb") as f:
+                data = pickle.load(f)
+            self.ner_model = data["weights"]
+            self.ner_classes = set(data["classes"])
             return True
-        except Exception:
-            self.ner_pipeline = None
+        except FileNotFoundError:
+            self.ner_model = None
             return False
+
+    def _ner_predict(self, tokens: list[str]) -> list[str]:
+        """Run the Averaged Perceptron NER tagger over tokens."""
+        labels = []
+        prev_label = "O"
+        weights = self.ner_model
+        classes = self.ner_classes
+        for i in range(len(tokens)):
+            features = extract_features(tokens, i, prev_label)
+            scores: dict[str, float] = defaultdict(float)
+            for feat, value in features.items():
+                if feat in weights:
+                    for label, weight in weights[feat].items():
+                        scores[label] += value * weight
+            label = max(classes, key=lambda c: scores.get(c, 0.0))
+            labels.append(label)
+            prev_label = label
+        return labels
 
     def redact(self, text: str) -> dict[str, Any]:
         redacted = text
         redactions: list[str] = []
 
-        if self.ner_pipeline is not None:
+        # NER model pass: detect entities and redact them
+        if self.ner_model is not None:
             try:
-                entities = self.ner_pipeline(text)
-                for ent in entities:
-                    entity_word = ent.get("word", "")
-                    entity_group = str(ent.get("entity_group", "PII")).upper()
-                    if not entity_word:
-                        continue
-                    token = f"[{entity_group}_REDACTED]"
-                    if entity_word in redacted:
-                        redacted = redacted.replace(entity_word, token)
-                        redactions.append(entity_group)
+                tokens = re.findall(r"\S+", redacted)
+                if tokens:
+                    labels = self._ner_predict(tokens)
+                    # Build entity spans (right-to-left replacement to preserve indices)
+                    spans: list[tuple[int, int, str]] = []
+                    for token, label in zip(tokens, labels):
+                        if label.startswith("B-") or label.startswith("I-"):
+                            etype = label[2:]
+                            start = redacted.find(token)
+                            if start != -1:
+                                spans.append((start, start + len(token), etype))
+                    # Replace right-to-left so indices stay valid
+                    for start, end, etype in sorted(spans, key=lambda s: s[0], reverse=True):
+                        tag = f"[{etype}_REDACTED]"
+                        redacted = redacted[:start] + tag + redacted[end:]
+                        redactions.append(etype)
             except Exception:
                 pass
 
