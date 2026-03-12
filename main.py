@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
-from agents import LLMAgent, banking_db, managing_agent as ma
+from agents import llm_agent, banking_db, managing_agent as ma
 from agents.managing_agent import QueryResult
 from config import settings
 from firewall.interceptor import Interceptor
@@ -34,7 +34,6 @@ app.add_middleware(
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("aegis")
 
-llm_agent = LLMAgent()
 sentinel = Sentinel()
 redactor = Redactor()
 weilchain = Weilchain(db_path=settings.weilchain_db_path)
@@ -58,10 +57,15 @@ def chat(payload: ChatRequest) -> ChatResponse:
     logger.info("[ingress] trace=%s verdict=%s", ingress["trace_id"], ingress["verdict"])
     if ingress["verdict"] == "BLOCKED":
         logger.warning("[blocked] trace=%s threat=%s", ingress["trace_id"], ingress["threat_type"])
+        blocked_resp = llm_agent.handle_blocked(
+            trace_id=ingress["trace_id"],
+            threat_type=ingress["threat_type"],
+            session_id=payload.session_id,
+        )
         return ChatResponse(
             trace_id=ingress["trace_id"],
             verdict="BLOCKED",
-            response=llm_agent.handle_blocked(),
+            response=blocked_resp.answer,
             redactions=[],
         )
 
@@ -74,12 +78,17 @@ def chat(payload: ChatRequest) -> ChatResponse:
     logger.info("[db] trace=%s rows=%d", ingress["trace_id"], len(raw_db))
     egress = interceptor.egress(ingress["trace_id"], payload.session_id, str(raw_db))
     logger.info("[egress] trace=%s verdict=%s redactions=%s", ingress["trace_id"], egress["verdict"], egress["redactions"])
-    synthesized = llm_agent.synthesize(egress["sanitized_payload"], payload.message)
+    agent_resp = llm_agent.synthesize(
+        user_prompt=payload.message,
+        sanitised_data=raw_db,
+        trace_id=ingress["trace_id"],
+        session_id=payload.session_id,
+    )
 
     return ChatResponse(
         trace_id=ingress["trace_id"],
         verdict=egress["verdict"],
-        response=synthesized,
+        response=agent_resp.answer,
         redactions=egress["redactions"],
     )
 
