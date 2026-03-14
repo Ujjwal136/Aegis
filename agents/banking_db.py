@@ -1,7 +1,7 @@
 import sqlite3
-import os
 import re
-from pathlib import Path
+
+from config import settings
 
 
 SEED_CUSTOMERS = [
@@ -29,8 +29,9 @@ _DANGEROUS = re.compile(
 
 
 class BankingDB:
-    def __init__(self, db_path: str = "banking.db"):
-        self._conn = sqlite3.connect(db_path)
+    def __init__(self, db_path: str = settings.database_path):
+        # FastAPI handlers may run in different threads; this DB object is shared.
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._create_and_seed()
 

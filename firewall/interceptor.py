@@ -19,9 +19,9 @@ class Interceptor:
         if scan["is_threat"]:
             self.weilchain.commit(
                 session_id=session_id,
-                event_type="BLOCK",
+                event_type="INGRESS_BLOCK",
                 threat_type=scan["threat_type"],
-                layer_used="HEURISTIC",
+                layer_used=scan.get("layer_used", "HEURISTIC"),
                 confidence=scan["confidence"],
                 trace_id=trace_id,
             )
@@ -38,8 +38,8 @@ class Interceptor:
         if verdict == "SUSPICIOUS":
             self.weilchain.commit(
                 session_id=session_id,
-                event_type="REDACT",
-                threat_type="ingress_pii",
+                event_type="INGRESS_REDACT",
+                threat_type="INGRESS_PII",
                 layer_used="NER+REGEX",
                 confidence=scan["confidence"],
                 encrypted_fields=prompt_redacted.get("encrypted_fields", []),
@@ -62,8 +62,8 @@ class Interceptor:
         if verdict == "SUSPICIOUS":
             self.weilchain.commit(
                 session_id=session_id,
-                event_type="REDACT",
-                threat_type="egress_pii",
+                event_type="EGRESS_REDACT",
+                threat_type="EGRESS_PII",
                 layer_used="NER+REGEX",
                 confidence=1.0,
                 encrypted_fields=result.get("encrypted_fields", []),

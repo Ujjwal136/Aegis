@@ -42,28 +42,52 @@ interceptor = Interceptor(sentinel, redactor, weilchain)
 sentinel_loaded = sentinel.load()
 redactor_loaded = redactor.load()
 
-# ── Startup health logging ─────────────────────────────────
-logger.info("Aegis Firewall starting...")
-logger.info("Sentinel Layer A (SGD) — %s", "LOADED" if sentinel.layer_a_loaded else "NOT AVAILABLE (fallback mode)")
-logger.info("Sentinel Layer B (MLP) — %s", "LOADED" if sentinel.layer_b_loaded else "NOT AVAILABLE (fallback mode)")
-logger.info("Redactor NER (Perceptron) — %s", "LOADED" if redactor.ner_model is not None else "NOT AVAILABLE (fallback mode)")
-logger.info("Redactor Regex — LOADED")
-try:
-    from firewall.fpe_engine import _get_numeric_cipher
-    _get_numeric_cipher()
-    logger.info("FPE Engine — LOADED")
-except Exception:
-    logger.info("FPE Engine — NOT AVAILABLE (no keys configured)")
-logger.info("Weilchain — LOADED")
-try:
-    from agents.banking_db import BankingDB as _BDB
-    _tmp = _BDB()
-    _count = _tmp._conn.execute("SELECT COUNT(*) FROM customers").fetchone()[0]
-    logger.info("Banking DB — LOADED (%d customers)", _count)
-    _tmp._conn.close()
-except Exception:
-    logger.info("Banking DB — LOADED (count unavailable)")
-logger.info("Aegis Firewall ready")
+
+@app.on_event("startup")
+def log_startup_status() -> None:
+    logger.info("Aegis Firewall starting...")
+
+    try:
+        layer_a = sentinel.layer_a_loaded
+        logger.info("Sentinel Layer A (SGD) - %s", "LOADED" if layer_a else "NOT AVAILABLE (fallback mode)")
+    except Exception:
+        logger.exception("Sentinel Layer A status check failed")
+
+    try:
+        layer_b = sentinel.layer_b_loaded
+        logger.info("Sentinel Layer B (DistilBERT) - %s", "LOADED" if layer_b else "NOT AVAILABLE (fallback mode)")
+    except Exception:
+        logger.exception("Sentinel Layer B status check failed")
+
+    try:
+        has_ner = redactor.ner_model is not None
+        logger.info("Redactor NER (DistilBERT) - %s", "LOADED" if has_ner else "NOT AVAILABLE (fallback mode)")
+    except Exception:
+        logger.exception("Redactor NER status check failed")
+
+    logger.info("Redactor Regex - LOADED")
+
+    try:
+        from firewall.fpe_engine import _get_numeric_cipher
+
+        _get_numeric_cipher()
+        logger.info("FPE Engine - LOADED")
+    except Exception:
+        logger.exception("FPE Engine failed to initialize")
+
+    try:
+        _ = weilchain.stats()
+        logger.info("Weilchain - LOADED")
+    except Exception:
+        logger.exception("Weilchain status check failed")
+
+    try:
+        rows = banking_db.execute_query("SELECT customer_id FROM customers LIMIT 100")
+        logger.info("Banking DB - LOADED (%d customers)", len(rows))
+    except Exception:
+        logger.exception("Banking DB status check failed")
+
+    logger.info("Aegis Firewall ready")
 
 
 @app.post("/api/v1/chat", response_model=ChatResponse)

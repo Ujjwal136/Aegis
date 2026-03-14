@@ -1,6 +1,7 @@
 import os
 import json
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -55,13 +56,35 @@ Database schema:
 
     def _call_llm(self, user_intent: str) -> str:
         system = self.SYSTEM_PROMPT.format(schema=self._schema)
-        provider = settings.llm_provider.lower().strip()
+        provider = self._resolve_provider()
+        logger.info(
+            "ManagingAgent provider=%s (configured=%s)",
+            provider,
+            settings.llm_provider,
+        )
 
         if provider == "openai" and settings.openai_api_key:
             return self._call_openai(system, user_intent)
         if provider == "anthropic" and settings.anthropic_api_key:
             return self._call_anthropic(system, user_intent)
         return self._call_mock(user_intent)
+
+    def _resolve_provider(self) -> str:
+        configured = settings.llm_provider.lower().strip()
+        has_openai = bool(settings.openai_api_key)
+        has_anthropic = bool(settings.anthropic_api_key)
+
+        if configured == "openai":
+            return "openai" if has_openai else ("anthropic" if has_anthropic else "mock")
+        if configured == "anthropic":
+            return "anthropic" if has_anthropic else ("openai" if has_openai else "mock")
+        if configured == "mock":
+            if has_anthropic:
+                return "anthropic"
+            if has_openai:
+                return "openai"
+            return "mock"
+        return "anthropic" if has_anthropic else ("openai" if has_openai else "mock")
 
     def _call_openai(self, system: str, user_intent: str) -> str:
         client = self._get_client()
@@ -72,7 +95,7 @@ Database schema:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "gpt-4o-mini",
+                "model": settings.llm_model,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": user_intent},
@@ -93,7 +116,7 @@ Database schema:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "claude-3-5-sonnet-20241022",
+                "model": settings.llm_model,
                 "max_tokens": 256,
                 "system": system,
                 "messages": [{"role": "user", "content": user_intent}],
@@ -104,6 +127,17 @@ Database schema:
 
     def _call_mock(self, user_intent: str) -> str:
         lowered = user_intent.lower()
+        cust_match = re.search(r"\bcust\s*0*([0-9]{1,4})\b", lowered)
+        if cust_match:
+            cust_id = f"CUST{int(cust_match.group(1)):03d}"
+            return json.dumps({
+                "sql": (
+                    "SELECT customer_id, full_name, account_type, balance, city, kyc_status "
+                    f"FROM customers WHERE customer_id = '{cust_id}'"
+                ),
+                "reasoning": f"Looking up customer by id {cust_id}",
+            })
+
         if "balance" in lowered:
             name_part = ""
             for word in user_intent.split():
@@ -146,7 +180,7 @@ Database schema:
         try:
             llm_response = self._call_llm(user_intent)
         except Exception as e:
-            logger.error("LLM call failed: %s", e)
+            logger.exception("LLM call failed for intent=%r", user_intent)
             return QueryResult(sql_executed="", raw_data=[], row_count=0,
                                success=False, error="LLM returned invalid query format")
 
@@ -155,6 +189,7 @@ Database schema:
             parsed = json.loads(llm_response)
             sql = parsed["sql"]
         except (json.JSONDecodeError, KeyError, TypeError):
+            logger.error("Invalid LLM planning payload: %r", llm_response)
             return QueryResult(sql_executed="", raw_data=[], row_count=0,
                                success=False, error="LLM returned invalid query format")
 
@@ -164,12 +199,15 @@ Database schema:
         try:
             rows = banking_db.execute_query(sql)
         except ValueError:
+            logger.warning("Query failed safety rails: %s", sql)
             return QueryResult(sql_executed=sql, raw_data=[], row_count=0,
                                success=False, error="Query failed safety validation")
         except Exception as e:
+            logger.exception("Query execution failed: %s", sql)
             return QueryResult(sql_executed=sql, raw_data=[], row_count=0,
                                success=False, error=str(e))
 
+        logger.info("plan_and_execute success=True rows=%d", len(rows))
         return QueryResult(sql_executed=sql, raw_data=rows,
                            row_count=len(rows), success=True)
 

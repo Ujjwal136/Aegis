@@ -189,3 +189,6 @@ class Sentinel:
             if pattern.search(prompt):
                 return name
         return "none"
+
+
+sentinel = Sentinel()

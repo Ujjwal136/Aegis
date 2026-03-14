@@ -12,6 +12,8 @@ class Settings(BaseSettings):
     llm_model: str = "gpt-4o-mini"
     openai_api_key: str = ""
     anthropic_api_key: str = ""
+    fpe_key: str = ""
+    fpe_tweak: str = ""
 
     sentinel_model_path: str = "sentinel_model.joblib"
     sentinel_b_model_path: str = "sentinel_b_model.joblib"

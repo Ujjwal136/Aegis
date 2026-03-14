@@ -283,6 +283,9 @@ class Weilchain:
         }
 
 
+weilchain = Weilchain()
+
+
 # ── Self-test ──────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

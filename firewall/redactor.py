@@ -148,3 +148,6 @@ class Redactor:
             "redactions": unique_redactions,
             "encrypted_fields": sorted(set(encrypted_fields)),
         }
+
+
+redactor = Redactor()
