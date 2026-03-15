@@ -56,4 +56,4 @@ class HealthResponse(BaseModel):
     status: str
     sentinel_loaded: bool
     redactor_loaded: bool
-    weilchain: dict[str, str] = Field(default_factory=dict)
+    weilchain: dict[str, Any] = Field(default_factory=dict)

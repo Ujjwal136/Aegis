@@ -1,30 +1,19 @@
-## AegisAudit — Weilliptic Applet
+## Aegis WeilChain Audit
 
-AegisAudit is a Weilliptic Applet that stores tamper-evident
-security event records on WeilChain. Every blocked attack and
-PII redaction in Aegis produces an immutable on-chain receipt —
-cryptographically verifiable without storing any raw PII.
-Directly implements the Weilliptic Receipts concept.
+This project now uses the official Weilliptic Python SDK directly from
+the backend. The applet interface file is kept in this folder for
+reference, while commits are sent via:
 
-## Build
-  cd applet
-  npm install
-  npm run asbuild
+from weil_wallet import PrivateKey, Wallet, WeilClient
 
-## Deploy to WeilChain
-  wcli wallet create
-  # Add private key to WEIL_PRIVATE_KEY in .env
+## Runtime setup
 
-  wcli deploy build/aegis_audit.wasm
-  # Add applet address to WEIL_APPLET_ADDRESS in .env
+1. Install Python dependency: weil-wallet
+2. Place private_key.wc in project root
+3. Optionally set WEIL_KEY_PATH in .env
 
-## Interact via CLI
-  wcli call <address> get_all_entries
-  wcli call <address> verify_entry <trace_id>
-  wcli call <address> get_stats
+## Audit message format
 
-## Weilliptic Products Used
-  WeilChain  — audit entries stored immutably on-chain
-  Receipts   — every security event is a verifiable receipt
-  Cerebrum   — Aegis two-agent pipeline on WeilChain
-  Provable   — verify_entry() proves events occurred
+AEGIS|{event_type}|{threat_type}|{trace_id}|{session_id}|{layer_used}|{confidence}|{timestamp_utc}|{weilchain_hash}
+
+No raw PII is sent on-chain.

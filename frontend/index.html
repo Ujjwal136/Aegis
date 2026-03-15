@@ -457,6 +457,18 @@
       padding: 2px 8px;
       border-radius: 4px;
     }
+    .storage-badge {
+      display: inline-flex;
+      align-items: center;
+      margin-left: 6px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 0.66rem;
+      font-weight: 700;
+      letter-spacing: 0.3px;
+    }
+    .storage-badge.onchain { background: rgba(59,130,246,0.15); color: var(--primary); }
+    .storage-badge.local { background: rgba(156,163,175,0.2); color: var(--text-secondary); }
     .event-badge.block { background: rgba(239,68,68,0.15); color: var(--danger); }
     .event-badge.redact { background: rgba(245,158,11,0.15); color: var(--warning); }
     .no-entries {
@@ -698,10 +710,12 @@
             <div class="status-row"><span class="sk">FPE</span><span class="sv dot-ready">Ready</span></div>
           </div>
           <div class="status-card">
-            <div class="status-card-header"><span>🔗</span> Weilchain</div>
+            <div class="status-card-header"><span>🔗</span> WeilChain SDK</div>
             <div class="status-row"><span class="sk">Status</span><span class="sv" id="syWcStatus">—</span></div>
-            <div class="status-row"><span class="sk">Backend</span><span class="sv" id="syWcBackend">Applet</span></div>
-            <div class="status-row"><span class="sk">Applet</span><span class="sv" id="syWcAddress">—</span></div>
+            <div class="status-row"><span class="sk">Backend</span><span class="sv" id="syWcBackend">weilchain_applet</span></div>
+            <div class="status-row"><span class="sk">SDK</span><span class="sv" id="syWcSdk">—</span></div>
+            <div class="status-row"><span class="sk">Key File</span><span class="sv" id="syWcKey">—</span></div>
+            <div class="status-row"><span class="sk">Last Block</span><span class="sv" id="syWcBlock">—</span></div>
             <div class="status-row"><span class="sk">Entries</span><span class="sv" id="syWcEntries">—</span></div>
             <div class="status-row"><span class="sk">Tampered</span><span class="sv" id="syWcTampered">—</span></div>
           </div>
@@ -947,11 +961,14 @@
           var hashShort = (entry.weilchain_hash || "").substring(0, 16);
           var conf = typeof entry.confidence === "number" ? entry.confidence.toFixed(2) : "—";
           var traceShort = (entry.trace_id || "").substring(0, 12) + "…";
+          var storageBadge = entry.onchain
+            ? '<span class="storage-badge onchain">⛓ on-chain</span>'
+            : '<span class="storage-badge local">💾 local</span>';
 
           html += '<tr class="' + rowCls + '">';
           html += '<td><button class="expand-btn" data-idx="' + idx + '">▶</button></td>';
           html += "<td>" + escapeHtml(ts) + "</td>";
-          html += '<td><span class="event-badge ' + evtCls + '">' + escapeHtml(entry.event_type) + "</span></td>";
+          html += '<td><span class="event-badge ' + evtCls + '">' + escapeHtml(entry.event_type) + "</span>" + storageBadge + "</td>";
           html += "<td>" + escapeHtml(entry.threat_type || "—") + "</td>";
           html += "<td>" + escapeHtml(entry.layer_used || "—") + "</td>";
           html += "<td>" + conf + "</td>";
@@ -1057,8 +1074,9 @@
           document.getElementById("syWcStatus").innerHTML = onChain
             ? '<span class="dot-ready">On-Chain</span>'
             : '<span class="dot-offline">Offline</span>';
-          document.getElementById("syWcBackend").textContent = wc.backend || "Applet";
-          document.getElementById("syWcAddress").textContent = wc.applet_address || "not-configured";
+          document.getElementById("syWcBackend").textContent = wc.backend || "weilchain_applet";
+          document.getElementById("syWcSdk").textContent = wc.sdk_available ? "Available" : "Missing";
+          document.getElementById("syWcKey").textContent = wc.key_configured ? "Configured" : "Not found";
           document.getElementById("syLlmProv").textContent = "Mock";
           document.getElementById("lastCheck").textContent = "Last check: " + new Date().toLocaleTimeString();
 
@@ -1067,10 +1085,17 @@
             var sr = await fetch(API + "/api/v1/audit/stats");
             if (sr.ok) {
               var st = await sr.json();
-              document.getElementById("syWcEntries").textContent = st.total_events || 0;
+              document.getElementById("syWcEntries").textContent = st.total || st.total_events || 0;
               document.getElementById("syWcTampered").textContent = "0";
             }
           } catch (_) { /* ignore */ }
+
+          if (onChain && ledgerCache.length > 0) {
+            var firstOnchain = ledgerCache.find(function (e) { return !!e.onchain && e.block_height; });
+            document.getElementById("syWcBlock").textContent = firstOnchain ? firstOnchain.block_height : "—";
+          } else {
+            document.getElementById("syWcBlock").textContent = "—";
+          }
 
           /* Verify for tampered count */
           try {
@@ -1089,6 +1114,9 @@
           document.getElementById("sySentA").innerHTML = '<span class="dot-offline">Offline</span>';
           document.getElementById("syRedNer").innerHTML = '<span class="dot-offline">Offline</span>';
           document.getElementById("syWcStatus").innerHTML = '<span class="dot-offline">Offline</span>';
+          document.getElementById("syWcSdk").textContent = "Unknown";
+          document.getElementById("syWcKey").textContent = "Unknown";
+          document.getElementById("syWcBlock").textContent = "—";
           document.getElementById("lastCheck").textContent = "Last check: " + new Date().toLocaleTimeString() + " (offline)";
         }
       }

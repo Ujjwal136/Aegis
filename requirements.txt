@@ -6,3 +6,4 @@ python-dotenv==1.1.1
 pytest==8.4.1
 httpx==0.28.1
 ff3==1.0.3
+weil-wallet

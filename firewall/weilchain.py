@@ -1,17 +1,15 @@
-"""Weilchain applet bridge for Aegis audit events.
+"""Weilchain audit ledger for Aegis.
 
-Primary storage is the Weilliptic applet via Node bridge. If bridge access is
-unavailable, this class degrades to in-memory fallback while keeping the API
-stable so the server does not crash.
+Primary storage uses the official Weilliptic Python SDK. If SDK/key setup is
+missing, this class degrades to local in-memory cache while keeping API stable.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
-import json
+import logging
 import os
-import shutil
-import subprocess
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
@@ -19,8 +17,22 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from config import settings
 
-# ── Hash function (deterministic — same inputs → same hash) ────────────
+# Audit ledger backed by Weilliptic WeilChain
+# Uses official weil_wallet Python SDK
+# from weil_wallet import PrivateKey, Wallet, WeilClient
+# Every security event committed on-chain via client.audit()
+
+try:
+    from weil_wallet import PrivateKey, Wallet, WeilClient
+
+    WEIL_SDK_AVAILABLE = True
+except ImportError:
+    WEIL_SDK_AVAILABLE = False
+
+
+logger = logging.getLogger("aegis")
 
 
 def _compute_hash(
@@ -34,41 +46,66 @@ def _compute_hash(
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
-# ── WeilEntry ──────────────────────────────────────────────────────────
-
-
 @dataclass
 class WeilEntry:
-    trace_id: str              # UUID4 — unique per request
-    session_id: str            # UUID4 — groups requests per user session
-    event_type: str            # "INGRESS_BLOCK" | "EGRESS_REDACT"
-    threat_type: str           # e.g. "PROMPT_OVERRIDE", "PII_FISHING", "EGRESS_PII"
-    timestamp_utc: str         # ISO 8601 UTC string
-    weilchain_hash: str        # SHA-256 of the above fields combined
-    encrypted_fields: list[str] = field(default_factory=list)  # PII types FPE-encrypted
-    redacted_fields: list[str] = field(default_factory=list)   # PII types token-redacted
-    layer_used: str = ""       # "A", "B", "A+B", "NER", "NER+REGEX", "REGEX", "HEURISTIC"
-    confidence: float = 0.0    # threat confidence score 0.0-1.0
-
-
-# ── Weilchain ──────────────────────────────────────────────────────────
+    trace_id: str
+    session_id: str
+    event_type: str
+    threat_type: str
+    timestamp_utc: str
+    weilchain_hash: str
+    encrypted_fields: list[str] = field(default_factory=list)
+    redacted_fields: list[str] = field(default_factory=list)
+    layer_used: str = ""
+    confidence: float = 0.0
+    block_height: str = ""
+    batch_id: str = ""
+    tx_idx: str = ""
+    onchain: bool = False
 
 
 class Weilchain:
     def __init__(self, db_path: str = "weilchain.db") -> None:
         _ = db_path  # legacy arg retained for compatibility
-        root = Path(__file__).resolve().parent.parent
-        self.bridge_path = str(root / "applet" / "bridge.js")
-        self.applet_address = os.getenv("WEIL_APPLET_ADDRESS", "")
-        self._backend = "applet"
-        self._cache_entries: list[dict] = []
-        self._cache_ts: float = 0.0
+        self._backend = "weilchain_applet"
+        self._cache: list[dict] = []
+        self._cache_time: float = 0.0
         self._cache_ttl_seconds = 10.0
-        self._offline_ledger: list[dict] = []
-        self._last_error: str | None = None
-        self._last_online: bool = False
+        self._wallet: Wallet | None = None
+        self._sdk_ready = False
+        self._last_error: str = ""
+        self._key_path = settings.weil_key_path or os.getenv("WEIL_KEY_PATH", "private_key.wc")
 
-    # ── COMMIT ─────────────────────────────────────────────────────────
+        key_path = Path(self._key_path)
+        if WEIL_SDK_AVAILABLE and key_path.exists():
+            try:
+                pk = PrivateKey.from_file(str(key_path))
+                self._wallet = Wallet(pk)
+                self._sdk_ready = True
+                logger.info("WeilChain SDK ready ✅ - commits will go on-chain")
+            except Exception as exc:
+                self._last_error = str(exc)
+                logger.warning("WeilChain SDK init failed: %s", exc)
+        else:
+            logger.warning(
+                "WeilChain SDK not configured. Place private_key.wc in project root or set WEIL_KEY_PATH. "
+                "Audit events will be computed but not persisted on-chain."
+            )
+
+    async def _commit_onchain(self, message: str) -> dict:
+        if not self._wallet:
+            raise RuntimeError("wallet is not initialized")
+
+        async with WeilClient(self._wallet) as client:
+            result = await client.audit(message)
+            return {
+                "status": getattr(result, "status", ""),
+                "block_height": getattr(result, "block_height", ""),
+                "batch_id": getattr(result, "batch_id", ""),
+                "tx_idx": getattr(result, "tx_idx", ""),
+                "txn_result": getattr(result, "txn_result", ""),
+                "creation_time": str(getattr(result, "creation_time", "")),
+            }
 
     def commit(
         self,
@@ -81,7 +118,6 @@ class Weilchain:
         redacted_fields: list[str] | None = None,
         trace_id: str | None = None,
     ) -> WeilEntry:
-        """Create a new WeilEntry and persist via applet when available."""
         if trace_id is None:
             trace_id = str(uuid.uuid4())
         if encrypted_fields is None:
@@ -105,125 +141,58 @@ class Weilchain:
             confidence=confidence,
         )
 
-        ok, _ = self._call_applet(
-            "commit",
-            data={
-                "trace_id": entry.trace_id,
-                "session_id": entry.session_id,
-                "event_type": entry.event_type,
-                "threat_type": entry.threat_type,
-                "weilchain_hash": entry.weilchain_hash,
-                "timestamp": entry.timestamp_utc,
-            },
+        audit_message = (
+            f"AEGIS|{event_type}|{threat_type}|{trace_id}|"
+            f"{session_id}|{layer_used}|{confidence}|"
+            f"{timestamp_utc}|{weilchain_hash}"
         )
-        if not ok:
-            self._offline_ledger.append(asdict(entry))
-        # Force next read to refresh after each write.
-        self._cache_ts = 0.0
+
+        if self._sdk_ready:
+            try:
+                onchain_result = asyncio.run(self._commit_onchain(audit_message))
+                entry.block_height = str(onchain_result.get("block_height", ""))
+                entry.batch_id = str(onchain_result.get("batch_id", ""))
+                entry.tx_idx = str(onchain_result.get("tx_idx", ""))
+                entry.onchain = True
+                logger.info(
+                    "Committed on-chain ✅ block=%s batch=%s trace=%s",
+                    entry.block_height,
+                    entry.batch_id,
+                    trace_id,
+                )
+            except Exception as exc:
+                self._last_error = str(exc)
+                logger.warning("On-chain commit failed, entry stored locally: %s", exc)
+                self._cache.append(asdict(entry))
+        else:
+            self._cache.append(asdict(entry))
+            logger.info("WeilChain offline - entry cached locally: %s", trace_id)
+
+        self._cache_time = 0.0
         return entry
 
-    def _bridge_available(self) -> bool:
-        if not os.getenv("WEIL_PRIVATE_KEY") or not os.getenv("WEIL_APPLET_ADDRESS"):
-            return False
-        if not Path(self.bridge_path).exists():
-            return False
-        return shutil.which("node") is not None
-
-    def _normalize_entry(self, entry: dict) -> dict:
-        ts = entry.get("timestamp_utc") or entry.get("timestamp") or ""
-        return {
-            "trace_id": entry.get("trace_id", ""),
-            "session_id": entry.get("session_id", ""),
-            "event_type": entry.get("event_type", ""),
-            "threat_type": entry.get("threat_type", ""),
-            "timestamp_utc": ts,
-            "weilchain_hash": entry.get("weilchain_hash", entry.get("hash", "")),
-            "encrypted_fields": entry.get("encrypted_fields", []) or [],
-            "redacted_fields": entry.get("redacted_fields", []) or [],
-            "layer_used": entry.get("layer_used", ""),
-            "confidence": entry.get("confidence", 0.0),
-        }
-
-    def _parse_result(self, result):
-        if isinstance(result, str):
-            try:
-                return json.loads(result)
-            except Exception:
-                return result
-        return result
-
-    def _call_applet(self, action: str, **kwargs) -> tuple[bool, object | None]:
-        if not self._bridge_available():
-            self._last_online = False
-            self._last_error = "bridge unavailable"
-            return False, None
-
-        payload = {"action": action}
-        payload.update(kwargs)
-        try:
-            completed = subprocess.run(
-                ["node", self.bridge_path],
-                input=json.dumps(payload),
-                capture_output=True,
-                text=True,
-                timeout=7,
-            )
-            if completed.returncode != 0:
-                self._last_online = False
-                self._last_error = (completed.stderr or "bridge process failed").strip()
-                return False, None
-
-            parsed = json.loads((completed.stdout or "{}").strip() or "{}")
-            if parsed.get("error"):
-                self._last_online = False
-                self._last_error = parsed.get("error")
-                return False, None
-
-            self._last_online = True
-            self._last_error = None
-            return True, self._parse_result(parsed.get("result"))
-        except Exception as exc:
-            self._last_online = False
-            self._last_error = str(exc)
-            return False, None
-
-    # ── QUERY ──────────────────────────────────────────────────────────
-
     def get_all(self) -> list[dict]:
-        """Returns all entries, most recent first."""
         now = time.time()
-        if now - self._cache_ts <= self._cache_ttl_seconds:
-            return [dict(e) for e in self._cache_entries]
+        if now - self._cache_time <= self._cache_ttl_seconds:
+            return [dict(e) for e in reversed(self._cache)]
 
-        ok, result = self._call_applet("get_all")
-        if ok and isinstance(result, list):
-            entries = [self._normalize_entry(e if isinstance(e, dict) else {}) for e in result]
-            self._cache_entries = entries
-            self._cache_ts = now
-            return [dict(e) for e in entries]
-
-        entries = [self._normalize_entry(e) for e in reversed(self._offline_ledger)]
-        self._cache_entries = entries
-        self._cache_ts = now
-        return [dict(e) for e in entries]
+        # On-chain reads can be added later via SDK query APIs.
+        self._cache_time = now
+        return [dict(e) for e in reversed(self._cache)]
 
     def get_by_session(self, session_id: str) -> list[dict]:
-        """Returns all entries for a given session_id."""
         return [e for e in self.get_all() if e.get("session_id") == session_id]
 
     def get_by_trace(self, trace_id: str) -> Optional[dict]:
-        """Returns the single entry matching trace_id, or None."""
         for entry in self.get_all():
             if entry.get("trace_id") == trace_id:
                 return entry
         return None
 
     def get_by_event_type(self, event_type: str) -> list[dict]:
-        """Returns all entries of a given event_type."""
         return [e for e in self.get_all() if e.get("event_type") == event_type]
 
     def stats(self) -> dict:
-        """Returns summary statistics."""
         all_entries = self.get_all()
         threat_breakdown: dict[str, int] = {}
         sessions: set[str] = set()
@@ -240,34 +209,28 @@ class Weilchain:
                 egress_redacts += 1
 
         return {
+            "total": len(all_entries),
             "total_events": len(all_entries),
             "ingress_blocks": ingress_blocks,
             "egress_redacts": egress_redacts,
             "unique_sessions": len(sessions),
             "threat_type_breakdown": threat_breakdown,
-            "storage": "on-chain" if self._last_online else "offline-fallback",
+            "storage": "on-chain" if self._sdk_ready else "offline-fallback",
         }
 
     def connectivity(self) -> dict:
+        key_exists = Path(self._key_path).exists()
         return {
-            "status": "online" if self._last_online else "offline",
-            "backend": "applet",
-            "applet_address": self.applet_address or "not-configured",
+            "status": "online" if self._sdk_ready else "offline",
+            "backend": "weilchain_applet",
+            "sdk_available": WEIL_SDK_AVAILABLE,
+            "key_configured": key_exists,
             "error": self._last_error or "",
         }
 
-    # ── TAMPER DETECTION ───────────────────────────────────────────────
-
     def verify(self, entry_or_trace_id) -> dict | bool:
-        """Verify integrity of a single ledger entry.
-
-        Accepts either a trace_id string or a dict with entry fields.
-        When a dict is passed (legacy callers / tests), re-derive the hash
-        and return True/False for backward-compat.
-        """
         if isinstance(entry_or_trace_id, dict):
             entry = entry_or_trace_id
-            # Legacy path: match old API used by tests
             ts_key = "timestamp_utc" if "timestamp_utc" in entry else "timestamp"
             base = (
                 f"{entry['trace_id']}|{entry['session_id']}|{entry['event_type']}|"
@@ -277,20 +240,11 @@ class Weilchain:
             stored = entry.get("weilchain_hash") or entry.get("hash", "")
             return expected == stored
 
-        # New path: trace_id string
         trace_id = entry_or_trace_id
-        ok, result = self._call_applet("verify", trace_id=trace_id)
-        if ok and isinstance(result, dict):
-            if result.get("error"):
-                return {"error": "trace_id not found"}
-            out = dict(result)
-            out.setdefault("trace_id", trace_id)
-            out.setdefault("tampered", not bool(out.get("valid", False)))
-            return out
-
         entry = self.get_by_trace(trace_id)
         if entry is None:
-            return {"error": "trace_id not found"}
+            return {"error": "not found"}
+
         derived_hash = _compute_hash(
             entry["trace_id"],
             entry["session_id"],
@@ -307,7 +261,6 @@ class Weilchain:
         }
 
     def verify_all(self) -> dict:
-        """Runs verify() on every entry in the ledger."""
         all_entries = self.get_all()
         valid_count = 0
         tampered_count = 0
